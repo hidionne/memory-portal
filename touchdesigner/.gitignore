@@ -1,0 +1,6 @@
+# MediaPipe plugin (≈180 MB) — download it, see README
+vendor/
+# TouchDesigner's automatic backups and incremental saves
+Backup/
+*.[0-9].toe
+*.[0-9][0-9].toe
