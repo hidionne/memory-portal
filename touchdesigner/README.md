@@ -28,6 +28,7 @@ curl -fsSL -o touchdesigner/vendor/mediapipe-v0.6.0/toxes/hand_tracking.tox http
 2. Allow camera access if macOS asks. MediaPipe starts its own hidden browser, and the first hand tracking can take a few seconds.
 3. Watch `out1`: open its viewer, or press F1 for Perform mode, which shows `out1` full screen.
 4. If the wrong camera is picked, choose yours under `MediaPipe` → parameters → **Webcam**.
+5. If the picture goes black (e.g. after the Mac sleeps), press **Reset** on `MediaPipe`'s parameters to restart the camera.
 
 ## Putting your own image in the portal
 
@@ -50,4 +51,4 @@ Wire any TOP into **`portal_image`**: a Movie File In with a photo, a video, a S
 
 - Crayon / stitched kid-drawing border and fingertip doodles (see the web version in `src/`).
 - A real childhood photo in place of the green screen.
-- Only tested with fixed, made-up corner positions and a quick live look; it hasn't had a full two-hand session in front of the webcam yet.
+- Live two-hand alignment checked on 26 Oct 2026 with hands held still: all four corners sat on the fingertips. Fast movement hasn't been checked, and MediaPipe adds a few frames of lag.
