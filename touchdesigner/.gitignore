@@ -7,3 +7,6 @@ Backup/
 # Your photos stay on this Mac (repo is public)
 photos/*
 !photos/.gitkeep
+# Recordings are large and personal
+recordings/*
+!recordings/.gitkeep
