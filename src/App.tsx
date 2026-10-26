@@ -1,69 +1,51 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { CameraController, CameraError, looksBuiltIn, type ActiveCameraSettings, type CameraErrorKind, type CameraInfo } from './engine/camera';
-import { createSamplePhotos, isProbablyImage, loadPhotoFile, releasePhoto, type Photo } from './engine/photos';
-import { PortalEngine, type HandStatus, type InputMode, type SourceKind } from './engine/PortalEngine';
+import { CameraController, CameraError, looksBuiltIn, type CameraErrorKind } from './engine/camera';
+import { isProbablyImage, loadPhotoFile, releasePhoto, type Photo } from './engine/photos';
+import { PortalEngine, type HandStatus, type SourceKind } from './engine/PortalEngine';
 import { CanvasRecorder, recordingSupport, type RecordingResult } from './engine/recorder';
 import { nextIndex, prevIndex } from './lib/gestureMachine';
 import { fitAspect } from './lib/mapping';
-import type { Framing } from './lib/photoFraming';
-import { aspectValue, loadDeviceId, loadSettings, saveDeviceId, saveSettings, toEngineSettings, type UISettings } from './settings';
-import { createSky } from './engine/sky';
-import { Icon } from './ui/controls';
-import { CameraTab, PhotosTab, PortalTab } from './ui/Tabs';
-import { useShortcuts } from './ui/useShortcuts';
+import { aspectValue, loadDeviceId, loadSettings, toEngineSettings } from './settings';
+
+/**
+ * Plain version: one TouchDesigner-style viewer node. A column of square
+ * buttons (camera, record, photos, fullscreen), thin status bars and the node
+ * name underneath. No decorations on the video.
+ */
 
 type CameraPhase = { phase: 'off' } | { phase: 'starting' } | { phase: 'on' } | { phase: 'error'; kind: CameraErrorKind; message: string };
-type DrawerTab = 'photos' | 'portal' | 'camera';
-type RecPhase = { phase: 'idle' } | { phase: 'countdown'; count: number } | { phase: 'recording'; startedAt: number };
+type RecPhase = { phase: 'idle' } | { phase: 'starting' } | { phase: 'recording'; startedAt: number; withAudio: boolean };
 
-const CAMERA_ERROR_COPY: Record<CameraErrorKind, { title: string; body: string }> = {
-  denied: {
-    title: 'Camera access is blocked',
-    body: 'Allow the camera from the icon in the address bar (or System Settings › Privacy & Security › Camera for your browser), then try again.',
-  },
-  unavailable: {
-    title: 'No camera found',
-    body: 'Connect a camera, or check that your browser can see one. You can still use the mouse demo.',
-  },
-  'in-use': {
-    title: 'Camera is busy',
-    body: 'Another app may be using it (FaceTime, Zoom, Photo Booth). Close it and try again.',
-  },
-  insecure: {
-    title: 'Camera needs a secure page',
-    body: 'Open the site over HTTPS or on localhost.',
-  },
-  unknown: {
-    title: 'Camera could not start',
-    body: 'Something went wrong starting the camera.',
-  },
+const CAMERA_ERRORS: Record<CameraErrorKind, string> = {
+  denied: 'camera blocked: allow it from the address bar, then try again',
+  unavailable: 'no camera found',
+  'in-use': 'camera busy: close FaceTime / Zoom / Photo Booth and try again',
+  insecure: 'camera needs https or localhost',
+  unknown: 'camera could not start',
 };
 
-/** The title, each letter in a different crayon. */
-const WORDMARK = [...'memory portal'].map((ch, i) => [
-  ch,
-  ['#f0559c', '#ff8f2e', '#3b86de', '#47a84a', '#9653d3', '#e4463a'][i % 6],
-]);
+const HAND_LABEL: Record<HandStatus, string> = {
+  off: 'tracking off',
+  loading: 'loading hand model…',
+  failed: 'hand model failed to load',
+  searching: 'hands 0',
+  one: 'hands 1',
+  ready: 'hands 2',
+};
 
 const fullscreenSupported =
   typeof document !== 'undefined' &&
   !!(document.fullscreenEnabled || (document as Document & { webkitFullscreenEnabled?: boolean }).webkitFullscreenEnabled);
 
 export default function App() {
-  const [settings, setSettings] = useState<UISettings>(loadSettings);
+  const settings = useMemo(loadSettings, []);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loadingCount, setLoadingCount] = useState(0);
-  const [notices, setNotices] = useState<{ id: number; text: string }[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
   const [source, setSource] = useState<SourceKind>('none');
-  const [inputMode, setInputMode] = useState<InputMode>('mouse');
   const [camera, setCamera] = useState<CameraPhase>({ phase: 'off' });
-  const [cameraInfo, setCameraInfo] = useState<ActiveCameraSettings | null>(null);
-  const [cameras, setCameras] = useState<CameraInfo[]>([]);
-  const [hand, setHand] = useState<{ status: HandStatus; detail: string | null }>({ status: 'off', detail: null });
-  const [clean, setClean] = useState(false);
-  /** Which side drawer is open; null = just the portal. */
-  const [tab, setTab] = useState<DrawerTab | null>(null);
+  const [hand, setHand] = useState<HandStatus>('off');
   const [rec, setRec] = useState<RecPhase>({ phase: 'idle' });
   const [recResult, setRecResult] = useState<RecordingResult | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -76,47 +58,37 @@ export default function App() {
   const engineRef = useRef<PortalEngine | null>(null);
   const recorderRef = useRef<CanvasRecorder | null>(null);
   const photosRef = useRef<Photo[]>([]);
-  const samplesRequested = useRef(false);
-  const noticeId = useRef(0);
-  const countdownTimer = useRef<number | null>(null);
+  const noticeTimer = useRef<number | null>(null);
   photosRef.current = photos;
 
   const recordSupport = useMemo(recordingSupport, []);
-  /** Crayon sky painted once and used as the frame around the video. */
-  const skyUrl = useMemo(() => createSky(1600, 1000, 11).toDataURL('image/jpeg', 0.86), []);
-  const selected = photos.find((p) => p.id === selectedId) ?? null;
 
   const notify = useCallback((text: string) => {
-    const id = ++noticeId.current;
-    setNotices((n) => [...n, { id, text }]);
-    window.setTimeout(() => setNotices((n) => n.filter((x) => x.id !== id)), 7000);
+    setNotice(text);
+    if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(null), 7000);
   }, []);
 
   // ------------------------------------------------------------- engine
 
   useEffect(() => {
-    const engine = new PortalEngine(canvasRef.current!, toEngineSettings(loadSettings()), {
-      onHandStatus: (status, detail) => setHand({ status, detail: detail ?? null }),
+    const engine = new PortalEngine(canvasRef.current!, toEngineSettings(settings), {
+      onHandStatus: (status) => setHand(status),
       onAdvance: (id) => setSelectedId(id),
       onCameraEnded: () => {
         engine.setIdle();
         setSource('none');
-        setInputMode('mouse');
         setCamera({ phase: 'error', kind: 'unavailable', message: 'The camera was disconnected.' });
       },
     });
     engine.attachOverlay(overlayRef.current);
-    engineRef.current = engine;    recorderRef.current = new CanvasRecorder();
+    engineRef.current = engine;
+    recorderRef.current = new CanvasRecorder();
     return () => {
       recorderRef.current?.dispose();
       engine.dispose();
       engineRef.current = null;
     };
-  }, []);
-
-  useEffect(() => {
-    engineRef.current?.setSettings(toEngineSettings(settings));
-    saveSettings(settings);
   }, [settings]);
 
   useEffect(() => {
@@ -127,33 +99,14 @@ export default function App() {
     engineRef.current?.selectPhoto(selectedId);
   }, [selectedId, photos]);
 
-  useEffect(() => {
-    engineRef.current?.setCleanMode(clean);
-  }, [clean]);
-
-  // Sample memories so the tool can be tried immediately.
-  useEffect(() => {
-    if (samplesRequested.current) return;
-    samplesRequested.current = true;
-    void createSamplePhotos().then((samples) => {
-      setPhotos((prev) => [...prev, ...samples]);
-      setSelectedId((id) => id ?? samples[0]?.id ?? null);
-    });
-  }, []);
-
-  // Release all photo resources on unmount.
   useEffect(() => () => photosRef.current.forEach(releasePhoto), []);
 
-  // Size the canvas element to the exact output aspect inside the stage.
+  // Size the canvas to the output aspect inside the viewer.
   useLayoutEffect(() => {
     const el = stageRef.current;
     if (!el) return;
     const measure = () => {
-      const pad = clean ? 0 : 46;
-      const box = fitAspect(
-        { width: Math.max(1, el.clientWidth - pad * 2), height: Math.max(1, el.clientHeight - pad * 2) },
-        aspectValue(settings.aspect),
-      );
+      const box = fitAspect({ width: Math.max(1, el.clientWidth), height: Math.max(1, el.clientHeight) }, aspectValue(settings.aspect));
       const size = { width: Math.floor(box.width), height: Math.floor(box.height) };
       setDisplay(size);
       engineRef.current?.setDisplaySize(size);
@@ -162,9 +115,7 @@ export default function App() {
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [settings.aspect, clean]);
-
-  const update = useCallback((patch: Partial<UISettings>) => setSettings((s) => ({ ...s, ...patch })), []);
+  }, [settings.aspect]);
 
   // ------------------------------------------------------------- photos
 
@@ -172,53 +123,28 @@ export default function App() {
     async (files: FileList | File[]) => {
       const list = Array.from(files);
       const images = list.filter(isProbablyImage);
-      if (images.length < list.length) notify(`${list.length - images.length} file(s) skipped: not an image.`);
-      let firstNew: string | null = null;
+      if (images.length < list.length) notify(`${list.length - images.length} file(s) skipped: not an image`);
       for (const file of images) {
         setLoadingCount((c) => c + 1);
         try {
           const photo = await loadPhotoFile(file);
-          firstNew ??= photo.id;
           setPhotos((prev) => [...prev, photo]);
+          setSelectedId((id) => id ?? photo.id);
         } catch (err) {
-          notify(err instanceof Error ? err.message : `Couldn’t load ${file.name}.`);
+          notify(err instanceof Error ? err.message : `couldn’t load ${file.name}`);
         } finally {
           setLoadingCount((c) => c - 1);
         }
       }
-      if (firstNew) setSelectedId(firstNew);
     },
     [notify],
   );
 
-  const removePhoto = useCallback((id: string) => {
+  const clearPhotos = useCallback(() => {
     const prev = photosRef.current;
-    const i = prev.findIndex((p) => p.id === id);
-    if (i < 0) return;
-    const next = prev.filter((p) => p.id !== id);
-    setPhotos(next);
-    setSelectedId((sel) => (sel === id ? (next[Math.min(i, next.length - 1)]?.id ?? null) : sel));
-    // Release after the engine has switched away from it (and any crossfade ends).
-    window.setTimeout(() => releasePhoto(prev[i]), 500);
-  }, []);
-
-  const removeSamples = useCallback(() => {
-    const prev = photosRef.current;
-    const keep = prev.filter((p) => !p.sample);
-    setPhotos(keep);
-    setSelectedId((sel) => (keep.some((p) => p.id === sel) ? sel : (keep[0]?.id ?? null)));
-    window.setTimeout(() => prev.filter((p) => p.sample).forEach(releasePhoto), 500);
-  }, []);
-
-  const movePhoto = useCallback((id: string, delta: -1 | 1) => {
-    setPhotos((prev) => {
-      const i = prev.findIndex((p) => p.id === id);
-      const j = i + delta;
-      if (i < 0 || j < 0 || j >= prev.length) return prev;
-      const next = [...prev];
-      [next[i], next[j]] = [next[j], next[i]];
-      return next;
-    });
+    setPhotos([]);
+    setSelectedId(null);
+    window.setTimeout(() => prev.forEach(releasePhoto), 500);
   }, []);
 
   const step = useCallback((dir: 1 | -1) => {
@@ -230,40 +156,25 @@ export default function App() {
     });
   }, []);
 
-  const setFraming = useCallback(
-    (framing: Framing) => {
-      if (!selectedId) return;
-      setPhotos((prev) => prev.map((p) => (p.id === selectedId ? { ...p, framing } : p)));
-    },
-    [selectedId],
-  );
-
   // ------------------------------------------------------------- camera
 
-  const startCamera = useCallback(async (explicitId?: string) => {
+  const startCamera = useCallback(async () => {
     const engine = engineRef.current;
     if (!engine) return;
     setCamera({ phase: 'starting' });
     try {
-      const remembered = explicitId ?? loadDeviceId();
-      let info = await engine.startCamera(remembered);
-      let list = await CameraController.listCameras();
-      // Prefer the MacBook's own camera over e.g. Continuity Camera unless the user chose otherwise.
+      const remembered = loadDeviceId();
+      const info = await engine.startCamera(remembered);
+      // Prefer the MacBook's own camera over e.g. Continuity Camera.
       if (!remembered && !looksBuiltIn(info.label)) {
-        const builtIn = list.find((c) => looksBuiltIn(c.label));
-        if (builtIn && builtIn.deviceId !== info.deviceId) info = await engine.startCamera(builtIn.deviceId);
-        list = await CameraController.listCameras();
+        const builtIn = (await CameraController.listCameras()).find((c) => looksBuiltIn(c.label));
+        if (builtIn && builtIn.deviceId !== info.deviceId) await engine.startCamera(builtIn.deviceId);
       }
-      if (explicitId) saveDeviceId(explicitId);
-      setCameras(list);
-      setCameraInfo(info);
       setSource('camera');
-      setInputMode('hand');
       setCamera({ phase: 'on' });
     } catch (err) {
       engine.setIdle();
       setSource('none');
-      setInputMode('mouse');
       const e = err instanceof CameraError ? err : new CameraError('unknown', String(err));
       setCamera({ phase: 'error', kind: e.kind, message: e.message });
     }
@@ -272,58 +183,16 @@ export default function App() {
   const stopCamera = useCallback(() => {
     engineRef.current?.setIdle();
     setSource('none');
-    setInputMode('mouse');
     setCamera({ phase: 'off' });
-    setCameraInfo(null);
   }, []);
 
-  const startDemo = useCallback(() => {
-    engineRef.current?.startDemo();
-    setSource('backdrop');
-    setInputMode('mouse');
-    setCamera({ phase: 'off' });
-    setCameraInfo(null);
-  }, []);
-
-  const changeInput = useCallback((mode: InputMode) => {
-    engineRef.current?.setInput(mode);
-    setInputMode(mode);
-  }, []);
-
-  // Restart the camera at the new resolution when performance mode changes.
-  const perfRef = useRef(settings.performance);
-  useEffect(() => {
-    if (perfRef.current === settings.performance) return;
-    perfRef.current = settings.performance;
-    if (source === 'camera' && cameraInfo) void startCamera(cameraInfo.deviceId);
-  }, [settings.performance, source, cameraInfo, startCamera]);
-
-  useEffect(() => {
-    if (source !== 'camera' || !navigator.mediaDevices) return;
-    const refresh = () => void CameraController.listCameras().then(setCameras);
-    navigator.mediaDevices.addEventListener('devicechange', refresh);
-    return () => navigator.mediaDevices.removeEventListener('devicechange', refresh);
-  }, [source]);
+  const toggleCamera = useCallback(() => {
+    if (camera.phase === 'starting') return;
+    if (source === 'camera') stopCamera();
+    else void startCamera();
+  }, [camera.phase, source, startCamera, stopCamera]);
 
   // ---------------------------------------------------------- recording
-
-  const beginRecording = useCallback(() => {
-    const engine = engineRef.current;
-    const recorder = recorderRef.current;
-    if (!engine || !recorder) return;
-    try {
-      recorder.start(engine.compositor.canvas, 30, settings.performance ? 6_000_000 : 12_000_000);
-      setRec({ phase: 'recording', startedAt: Date.now() });
-    } catch (err) {
-      setRec({ phase: 'idle' });
-      notify(`Recording couldn’t start: ${err instanceof Error ? err.message : err}. Try macOS screen recording (⇧⌘5) with clean mode.`);
-    }
-  }, [settings.performance, notify]);
-
-  const cancelCountdown = () => {
-    if (countdownTimer.current) window.clearInterval(countdownTimer.current);
-    countdownTimer.current = null;
-  };
 
   const stopRecording = useCallback(async () => {
     const recorder = recorderRef.current;
@@ -335,52 +204,41 @@ export default function App() {
         return result;
       });
     } catch (err) {
-      notify(err instanceof Error ? err.message : 'Recording failed.');
+      notify(err instanceof Error ? err.message : 'recording failed');
     } finally {
       setRec({ phase: 'idle' });
     }
   }, [notify]);
 
-  const canRecord = recordSupport.supported && source !== 'none';
+  const startRecording = useCallback(async () => {
+    const engine = engineRef.current;
+    const recorder = recorderRef.current;
+    if (!engine || !recorder) return;
+    setRec({ phase: 'starting' });
+    // Record your voice too; carry on without it if the mic is refused.
+    let mic: MediaStream | null = null;
+    try {
+      mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true } });
+    } catch {
+      notify('no mic access: recording video only');
+    }
+    try {
+      recorder.start(engine.compositor.canvas, 30, settings.performance ? 6_000_000 : 12_000_000, mic);
+      setRec({ phase: 'recording', startedAt: Date.now(), withAudio: !!mic });
+    } catch (err) {
+      setRec({ phase: 'idle' });
+      notify(`recording couldn’t start: ${err instanceof Error ? err.message : err}`);
+    }
+  }, [settings.performance, notify]);
+
+  const canRecord = recordSupport.supported && source === 'camera';
 
   const toggleRecord = useCallback(() => {
-    if (rec.phase === 'recording') {
-      void stopRecording();
-      return;
-    }
-    if (rec.phase === 'countdown') {
-      cancelCountdown();
-      setRec({ phase: 'idle' });
-      return;
-    }
-    if (!canRecord) return;
-    if (!settings.countdown) {
-      beginRecording();
-      return;
-    }
-    let count = 3;
-    setRec({ phase: 'countdown', count });
-    countdownTimer.current = window.setInterval(() => {
-      count -= 1;
-      if (count <= 0) {
-        cancelCountdown();
-        beginRecording();
-      } else {
-        setRec({ phase: 'countdown', count });
-      }
-    }, 1000);
-  }, [rec.phase, canRecord, settings.countdown, beginRecording, stopRecording]);
+    if (rec.phase === 'recording') void stopRecording();
+    else if (rec.phase === 'idle' && canRecord) void startRecording();
+  }, [rec.phase, canRecord, startRecording, stopRecording]);
 
-  useEffect(() => () => cancelCountdown(), []);
-
-  const discardRecording = () => {
-    setRecResult((old) => {
-      if (old) URL.revokeObjectURL(old.url);
-      return null;
-    });
-  };
-
-  // ------------------------------------------------------- clean/fullscreen
+  // ------------------------------------------------------- fullscreen/keys
 
   const toggleFullscreen = useCallback(() => {
     const doc = document as Document & { webkitFullscreenElement?: Element; webkitExitFullscreen?: () => void };
@@ -389,22 +247,27 @@ export default function App() {
       if (document.exitFullscreen) void document.exitFullscreen();
       else doc.webkitExitFullscreen?.();
     } else if (root.requestFullscreen) {
-      void root.requestFullscreen().catch(() => notify('Fullscreen was blocked by the browser.'));
+      void root.requestFullscreen().catch(() => notify('fullscreen was blocked by the browser'));
     } else {
       root.webkitRequestFullscreen?.();
     }
   }, [notify]);
 
-  useShortcuts({
-    prev: () => step(-1),
-    next: () => step(1),
-    toggleClean: () => setClean((c) => !c),
-    toggleDebug: () => update({ debug: !settings.debug }),
-    exitClean: () => (clean ? setClean(false) : setTab(null)),
-    togglePortal: () => engineRef.current?.toggleDemoPortal(),
-    toggleRecord,
-    toggleFullscreen: () => fullscreenSupported && toggleFullscreen(),
-  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || (e.target as HTMLElement)?.closest?.('input, textarea')) return;
+      const k = e.key.toLowerCase();
+      if (k === 'c') toggleCamera();
+      else if (k === 'r') toggleRecord();
+      else if (k === 'f' && fullscreenSupported) toggleFullscreen();
+      else if (k === 'arrowright') step(1);
+      else if (k === 'arrowleft') step(-1);
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [toggleCamera, toggleRecord, toggleFullscreen, step]);
 
   // --------------------------------------------------------- drag & drop
 
@@ -423,236 +286,118 @@ export default function App() {
     if (e.dataTransfer.files.length) void addFiles(e.dataTransfer.files);
   };
 
-  // ------------------------------------------------------------- status
+  // ------------------------------------------------------------- render
 
-  const status = useMemo((): { label: string; tone: 'idle' | 'ok' | 'wait' | 'bad' } => {
-    if (camera.phase === 'starting') return { label: 'Requesting camera…', tone: 'wait' };
-    if (camera.phase === 'error') return { label: CAMERA_ERROR_COPY[camera.kind].title, tone: 'bad' };
-    if (source === 'backdrop') return { label: 'Mouse demo', tone: 'ok' };
-    if (source === 'camera') {
-      if (inputMode === 'mouse') return { label: 'Camera · mouse control', tone: 'ok' };
-      switch (hand.status) {
-        case 'loading':
-          return { label: 'Loading hand model…', tone: 'wait' };
-        case 'failed':
-          return { label: 'Hand model failed to load', tone: 'bad' };
-        case 'searching':
-          return { label: 'No hands yet', tone: 'idle' };
-        case 'one':
-          return { label: 'One hand — bring the other one in', tone: 'wait' };
-        case 'ready':
-          return { label: 'Both hands — ready!', tone: 'ok' };
-        default:
-          return { label: 'Camera on', tone: 'ok' };
-      }
-    }
-    return { label: 'Camera not started', tone: 'idle' };
-  }, [camera, source, inputMode, hand.status]);
-
-  const hint =
-    source === 'backdrop' || (source === 'camera' && inputMode === 'mouse')
-      ? 'Drag the corners anywhere · drag inside to move · drag empty space to draw · Space opens/closes'
-      : source === 'camera' && (hand.status === 'searching' || hand.status === 'one')
-        ? 'Make a frame with both hands: index fingers on top, thumbs underneath.'
-        : source === 'camera' && hand.status === 'loading'
-          ? 'Loading the hand model…'
-          : null;
-
-  const hideCursor = clean && source === 'camera' && inputMode === 'hand';
-
-  const toggleTab = (t: DrawerTab) => setTab((cur) => (cur === t ? null : t));
-  const TABS: { id: DrawerTab; label: string }[] = [
-    { id: 'photos', label: 'photos' },
-    { id: 'portal', label: 'portal' },
-    { id: 'camera', label: 'camera' },
-  ];
+  const cameraLabel =
+    camera.phase === 'starting'
+      ? 'camera starting…'
+      : camera.phase === 'error'
+        ? CAMERA_ERRORS[camera.kind]
+        : source === 'camera'
+          ? HAND_LABEL[hand]
+          : 'camera off';
+  const selectedIndex = photos.findIndex((p) => p.id === selectedId);
+  const photoLabel = photos.length
+    ? `photo ${selectedIndex + 1}/${photos.length}${loadingCount ? ` · loading ${loadingCount}` : ''}`
+    : loadingCount
+      ? `loading ${loadingCount}`
+      : 'no photos · green screen';
 
   return (
-    <div className={`app ${clean ? 'is-clean' : ''}`} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
-      {!clean && (
-        <header className="title">
-          <span className="wordmark" aria-label="memory portal">
-            {WORDMARK.map(([ch, color], i) => (
-              <span key={i} aria-hidden="true" style={{ color }}>
-                {ch === ' ' ? '\u00a0' : ch}
+    <div className="app" onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+      <div className="node">
+        <div className="bar">
+          <span className={`cell ${camera.phase === 'error' || hand === 'failed' ? 'is-bad' : ''}`}>{cameraLabel}</span>
+          <span className="cell">
+            {rec.phase === 'recording' ? (
+              <span className="is-rec">
+                ● rec <RecTimer startedAt={rec.startedAt} />
+                {rec.withAudio ? ' · mic' : ''}
               </span>
-            ))}
+            ) : (
+              photoLabel
+            )}
           </span>
-          <span className={`status status-${status.tone}`} role="status" aria-live="polite">
-            <span className="status-dot" />
-            {status.label}
-          </span>
-        </header>
-      )}
-
-      <main
-        className="stage"
-        ref={stageRef}
-        style={{ backgroundImage: `url(${skyUrl})`, cursor: hideCursor ? 'none' : undefined }}
-      >
-        <div className="canvas-box" style={{ width: display.width, height: display.height }}>
-          <canvas ref={canvasRef} className="output" aria-label="Composited camera and portal preview" />
-          <canvas ref={overlayRef} className="overlay" style={hideCursor ? { cursor: 'none' } : undefined} />
-
-          {!clean && source === 'none' && (
-            <div className="stage-card">
-              {camera.phase === 'error' ? (
-                <>
-                  <h1 className="card-title">{CAMERA_ERROR_COPY[camera.kind].title}</h1>
-                  <p className="card-body">{CAMERA_ERROR_COPY[camera.kind].body}</p>
-                  {camera.kind === 'unknown' && <p className="card-detail">{camera.message}</p>}
-                </>
-              ) : (
-                <p className="card-lede">make a little frame with both hands — pointy fingers on top, thumbs underneath — and open a memory!</p>
-              )}
-              <div className="card-actions">
-                <button type="button" className="btn btn-accent" onClick={() => void startCamera()} disabled={camera.phase === 'starting'}>
-                  {camera.phase === 'starting' ? 'waiting for permission…' : camera.phase === 'error' ? 'try again' : 'start camera'}
-                </button>
-                <button type="button" className="btn" onClick={startDemo}>
-                  try with the mouse
-                </button>
-              </div>
-              <p className="card-foot">your camera and photos stay on this computer</p>
-            </div>
-          )}
-
-          {!clean && source === 'camera' && inputMode === 'hand' && hand.status === 'failed' && (
-            <div className="stage-banner" role="alert">
-              <span>The hand-tracking model couldn’t load.{hand.detail ? ` (${hand.detail})` : ''}</span>
-              <button type="button" className="btn btn-small" onClick={() => engineRef.current?.retryTracker()}>
-                retry
-              </button>
-              <button type="button" className="btn btn-small btn-quiet" onClick={() => changeInput('mouse')}>
-                use mouse
-              </button>
-            </div>
-          )}
-
-          {!clean && hint && <div className="stage-hint">{hint}</div>}
-
-          {rec.phase === 'countdown' && (
-            <div className="countdown" aria-live="assertive">
-              <span key={rec.count}>{rec.count}</span>
-            </div>
-          )}
         </div>
-        {clean && rec.phase === 'recording' && <span className="clean-rec-dot" aria-label="Recording" />}
-      </main>
 
-      {!clean && (
-        <nav className="rail" aria-label="Tools">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={`tag tag-${t.id} ${tab === t.id ? 'is-open' : ''}`}
-              aria-expanded={tab === t.id}
-              aria-controls="drawer"
-              onClick={() => toggleTab(t.id)}
+        <div className="body">
+          <nav className="tools" aria-label="Controls">
+            <ToolButton label={source === 'camera' ? 'Camera off (C)' : 'Camera on (C)'} active={source === 'camera'} onClick={toggleCamera} disabled={camera.phase === 'starting'}>
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.2" className="fill" /></svg>
+            </ToolButton>
+            <ToolButton
+              label={
+                !recordSupport.supported
+                  ? `Recording unavailable: ${recordSupport.reason}`
+                  : rec.phase === 'recording'
+                    ? 'Stop recording (R)'
+                    : source === 'camera'
+                      ? 'Record (R)'
+                      : 'Turn the camera on to record'
+              }
+              active={rec.phase === 'recording'}
+              rec
+              onClick={toggleRecord}
+              disabled={!canRecord && rec.phase === 'idle'}
             >
-              {t.label}
-            </button>
-          ))}
-          <div className="rail-gap" />
-          <button
-            type="button"
-            className={`tag tag-rec ${rec.phase !== 'idle' ? 'is-open' : ''}`}
-            onClick={toggleRecord}
-            disabled={!canRecord && rec.phase === 'idle'}
-            title={
-              recordSupport.supported
-                ? source === 'none'
-                  ? 'Start the camera or demo to record'
-                  : 'Record (R)'
-                : `Recording unavailable: ${recordSupport.reason}`
-            }
-          >
-            <span className="rec-dot" />
-            {rec.phase === 'recording' ? <RecTimer startedAt={rec.startedAt} /> : rec.phase === 'countdown' ? 'cancel' : 'record'}
-          </button>
-          <button type="button" className="tag tag-hide" onClick={() => setClean(true)} title="Hide everything (H) — Esc to come back">
-            hide
-          </button>
-        </nav>
-      )}
+              {rec.phase === 'recording' ? (
+                <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" className="fill" /></svg>
+              ) : (
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" className="fill" /></svg>
+              )}
+            </ToolButton>
+            <ToolButton label="Add photos (or drop them on the viewer)" onClick={() => fileRef.current?.click()}>
+              <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" /><path d="M4 16l5-5 4 4 2-2 5 5" /></svg>
+            </ToolButton>
+            <ToolButton label="Clear photos" onClick={clearPhotos} disabled={!photos.length}>
+              <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </ToolButton>
+            {fullscreenSupported && (
+              <ToolButton label="Fullscreen (F)" onClick={toggleFullscreen}>
+                <svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" /></svg>
+              </ToolButton>
+            )}
+          </nav>
 
-      {!clean && tab && (
-        <aside id="drawer" className={`drawer drawer-${tab}`} aria-label={`${tab} settings`}>
-          <button type="button" className="drawer-close" onClick={() => setTab(null)} aria-label="Close">
-            <Icon name="close" />
-          </button>
-          {tab === 'photos' && (
-            <PhotosTab
-              settings={settings}
-              update={update}
-              photos={photos}
-              selectedId={selectedId}
-              selected={selected}
-              loading={loadingCount}
-              onSelect={setSelectedId}
-              onPrev={() => step(-1)}
-              onNext={() => step(1)}
-              onMove={movePhoto}
-              onRemove={removePhoto}
-              onAdd={() => fileRef.current?.click()}
-              onFraming={setFraming}
-              onRemoveSamples={removeSamples}
-            />
-          )}
-          {tab === 'portal' && (
-            <PortalTab settings={settings} update={update} source={source} inputMode={inputMode} onInputMode={changeInput} />
-          )}
-          {tab === 'camera' && (
-            <CameraTab
-              settings={settings}
-              update={update}
-              source={source}
-              cameraBusy={camera.phase === 'starting'}
-              cameras={cameras}
-              cameraInfo={cameraInfo}
-              onStartCamera={() => void startCamera()}
-              onStopCamera={stopCamera}
-              onSelectCamera={(id) => void startCamera(id)}
-              onStartDemo={startDemo}
-              recording={rec.phase !== 'idle'}
-              recordSupport={recordSupport}
-              onFullscreen={toggleFullscreen}
-              fullscreenSupported={fullscreenSupported}
-            />
-          )}
-        </aside>
-      )}
-
-      {!clean && recResult && (
-        <div className="toast toast-result" role="status">
-          <span>
-            your video is ready · {(recResult.durationMs / 1000).toFixed(1)} s · {(recResult.blob.size / 1e6).toFixed(1)} MB
-          </span>
-          <a className="btn btn-accent btn-small" href={recResult.url} download={recResult.filename}>
-            save .{recResult.extension}
-          </a>
-          <button type="button" className="icon-btn" onClick={discardRecording} aria-label="Dismiss recording">
-            <Icon name="close" />
-          </button>
-        </div>
-      )}
-
-      {!clean && notices.length > 0 && (
-        <div className="notices" role="alert">
-          {notices.map((n) => (
-            <div key={n.id} className="toast">
-              {n.text}
+          <main className="viewer" ref={stageRef}>
+            <div className="canvas-box" style={{ width: display.width, height: display.height }}>
+              <canvas ref={canvasRef} className="output" aria-label="Camera and portal output" />
+              <canvas ref={overlayRef} className="overlay" />
+              {source === 'none' && (
+                <button type="button" className="viewer-msg" onClick={() => void startCamera()} disabled={camera.phase === 'starting'}>
+                  {camera.phase === 'starting' ? 'waiting for camera permission…' : camera.phase === 'error' ? `${CAMERA_ERRORS[camera.kind]} · click to retry` : 'click to start camera'}
+                </button>
+              )}
+              {hand === 'failed' && source === 'camera' && (
+                <button type="button" className="viewer-msg" onClick={() => engineRef.current?.retryTracker()}>
+                  hand model failed to load · click to retry
+                </button>
+              )}
             </div>
-          ))}
+            {dragOver && <div className="dropzone">drop photos</div>}
+          </main>
         </div>
-      )}
 
-      {dragOver && (
-        <div className="dropzone">
-          <span>drop your photos here!</span>
+        <div className="bar">
+          <span className="cell">{notice ?? 'two hands: index fingers top, thumbs bottom · pinch shut, reopen = next photo'}</span>
+          <span className="cell">
+            {recResult ? (
+              <>
+                {(recResult.durationMs / 1000).toFixed(1)}s · {(recResult.blob.size / 1e6).toFixed(1)} MB ·{' '}
+                <a href={recResult.url} download={recResult.filename}>
+                  save .{recResult.extension}
+                </a>
+              </>
+            ) : (
+              'R record · C camera · F fullscreen · ←/→ photo'
+            )}
+          </span>
         </div>
-      )}
+
+        <div className="name">
+          <span>portal</span>
+        </div>
+      </div>
 
       <input
         ref={fileRef}
@@ -669,6 +414,36 @@ export default function App() {
   );
 }
 
+function ToolButton({
+  label,
+  active,
+  rec,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  active?: boolean;
+  rec?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className={`tool ${active ? 'is-active' : ''} ${rec ? 'tool-rec' : ''}`}
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
 function RecTimer({ startedAt }: { startedAt: number }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -677,7 +452,7 @@ function RecTimer({ startedAt }: { startedAt: number }) {
   }, []);
   const s = Math.max(0, Math.floor((now - startedAt) / 1000));
   return (
-    <span className="rec-timer" aria-live="off">
+    <span aria-live="off">
       {String(Math.floor(s / 60)).padStart(2, '0')}:{String(s % 60).padStart(2, '0')}
     </span>
   );

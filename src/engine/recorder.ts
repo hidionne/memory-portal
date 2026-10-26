@@ -36,8 +36,9 @@ function timestamp() {
 }
 
 /**
- * Records the compositor canvas (video only, no audio). Only the canvas is
- * captured, so UI, debug overlays and demo handles never appear in exports.
+ * Records the compositor canvas, plus an optional microphone stream. Only the
+ * canvas is captured, so UI, debug overlays and demo handles never appear in
+ * exports.
  */
 export class CanvasRecorder {
   private recorder: MediaRecorder | null = null;
@@ -49,10 +50,14 @@ export class CanvasRecorder {
     return this.recorder?.state === 'recording';
   }
 
-  start(canvas: HTMLCanvasElement, fps: number, bitsPerSecond: number) {
+  /** `audio`'s tracks are stopped with the recording, releasing the microphone. */
+  start(canvas: HTMLCanvasElement, fps: number, bitsPerSecond: number, audio: MediaStream | null = null) {
     const support = recordingSupport();
-    if (!support.supported || !support.mimeType) throw new Error(support.reason);
-    this.stream = canvas.captureStream(fps);
+    if (!support.supported || !support.mimeType) {
+      audio?.getTracks().forEach((t) => t.stop());
+      throw new Error(support.reason);
+    }
+    this.stream = new MediaStream([...canvas.captureStream(fps).getVideoTracks(), ...(audio?.getAudioTracks() ?? [])]);
     this.chunks = [];
     this.recorder = new MediaRecorder(this.stream, {
       mimeType: support.mimeType,

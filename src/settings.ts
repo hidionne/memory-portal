@@ -27,18 +27,20 @@ export const DEFAULT_SETTINGS: UISettings = {
   mirror: true,
   sensitivity: 0.5,
   smoothing: 0.4,
-  photoMode: 'window',
+  // Plain version: the photo is pinned to the four corners, no border or doodles,
+  // and every close-and-reopen shows the next photo.
+  photoMode: 'follow',
   followFit: 'cover',
-  borderStyle: 'stitch',
+  borderStyle: 'none',
   borderSize: 0.5,
-  doodles: true,
-  garden: true,
-  newMemoryOnReopen: false,
+  doodles: false,
+  garden: false,
+  newMemoryOnReopen: true,
   // Landscape uses the MacBook camera's full frame with no cropping.
   aspect: '16:9',
   performance: false,
   debug: false,
-  countdown: true,
+  countdown: false,
 };
 
 /** Output (= recording) resolution. Performance mode drops to 720p-class. */
@@ -76,7 +78,7 @@ export function toEngineSettings(s: UISettings): EngineSettings {
   };
 }
 
-const KEY = 'memory-portal:settings:v3';
+const KEY = 'memory-portal-plain:settings:v1';
 const DEVICE_KEY = 'memory-portal:camera:v1';
 
 export function loadSettings(): UISettings {

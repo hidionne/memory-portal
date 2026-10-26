@@ -1,12 +1,16 @@
 /**
  * Recording container/codec candidates in preference order. MP4/H.264 is the
  * easiest to drop into an editor; Chrome (126+) and Safari can record it.
- * Otherwise fall back to WebM.
+ * Otherwise fall back to WebM. Types naming an audio codec come first so a
+ * microphone track can be recorded alongside the video.
  */
 export const RECORDING_CANDIDATES = [
+  'video/mp4;codecs=avc1.640028,mp4a.40.2',
+  'video/mp4;codecs=avc1,mp4a.40.2',
   'video/mp4;codecs=avc1.640028',
   'video/mp4;codecs=avc1',
   'video/mp4',
+  'video/webm;codecs=vp9,opus',
   'video/webm;codecs=vp9',
   'video/webm;codecs=vp8',
   'video/webm',

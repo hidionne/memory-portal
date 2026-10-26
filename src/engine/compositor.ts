@@ -46,8 +46,11 @@ export interface FrameState {
   performance: boolean;
 }
 
-/** Behind the camera before it's ready, and behind "whole photo" fits: crayon-sky blue, never black. */
-const BACKING = '#6ea8e8';
+/** Behind the camera before it's ready, and behind "whole photo" fits. */
+const BACKING = '#232323';
+/** Portal fill when there are no photos, and the one-hand line: green screen green. */
+const SCREEN_GREEN = '#00ff00';
+const LINE_GREEN = '#5cf25c';
 const CARD_MAX = 1280;
 
 /**
@@ -111,17 +114,43 @@ export class Compositor {
     // 2. Photograph.
     const q = s.quad;
     // No minimum size and no fading as it shrinks: the photo stays exactly as big as the fingers make it.
-    if (q && s.photo && s.portalAlpha > 0.002) {
+    if (q && s.portalAlpha > 0.002) {
       const alpha = clamp(s.portalAlpha, 0, 1);
-      if (s.photoMode === 'window') this.drawWindow(s, q, alpha, W, H);
+      if (!s.photo) this.drawGreen(q, alpha);
+      else if (s.photoMode === 'window') this.drawWindow(s, q, alpha, W, H);
       else this.drawFollow(s, q, alpha);
     }
 
-    // 3. Kid-drawing border and single-hand line.
+    // 3. Kid-drawing border and single-hand line (a plain green line without a border style).
     if (q && s.border.style !== 'none') drawBorder(ctx, q, s.border, scale, s.now, s.borderAlpha);
-    if (s.line) drawFingerLine(ctx, s.line.a, s.line.b, s.border, scale, s.now, s.lineAlpha);
+    if (s.line && s.border.style === 'none') this.drawPlainLine(s.line.a, s.line.b, scale, s.lineAlpha);
+    else if (s.line) drawFingerLine(ctx, s.line.a, s.line.b, s.border, scale, s.now, s.lineAlpha);
     ctx.globalAlpha = 1;
     if (s.garden) s.garden.draw(ctx, W, H, s.now, scale);
+  }
+
+  /** No photos yet: fill the portal green, like a green screen. */
+  private drawGreen(q: Quad, alpha: number) {
+    const { ctx } = this;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = SCREEN_GREEN;
+    tracePolygon(ctx, quadPoints(q));
+    ctx.fill('nonzero');
+    ctx.globalAlpha = 1;
+  }
+
+  private drawPlainLine(a: Point, b: Point, scale: number, alpha: number) {
+    if (alpha <= 0.01) return;
+    const { ctx } = this;
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = LINE_GREEN;
+    ctx.lineWidth = 7 * scale;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
   }
 
   /** Photo fixed to the frame; the portal reveals part of it. Non-zero fill keeps both lobes of an X. */

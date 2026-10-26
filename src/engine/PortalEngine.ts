@@ -4,7 +4,7 @@ import type { DetectedHand } from '../lib/handSelection';
 import { cameraToOutput, computeCoverTransform, elementToOutput, type CoverTransform } from '../lib/mapping';
 import { PointFilter, smoothingToParams } from '../lib/oneEuro';
 import type { FitMode } from '../lib/photoFraming';
-import { LM, palmSize, thresholdsForSensitivity, toCameraPixels } from '../lib/pinch';
+import { LM, palmSize, toCameraPixels } from '../lib/pinch';
 import { mapQuad, pointInQuad, quadFromHands, quadOpenness, quadPoints, rectToQuad, scaleQuad, type Quad } from '../lib/quad';
 import { TwoHandAssigner, type Side } from '../lib/twoHands';
 import { CameraController, type ActiveCameraSettings } from './camera';
@@ -42,6 +42,12 @@ export interface EngineCallbacks {
 }
 
 const CROSSFADE_MS = 260;
+/**
+ * Plain version: the portal closes only when the fingertips touch (openness
+ * <= 0.12 of palm size) and reopens at 0.18, the same as the TouchDesigner
+ * version. The dead band between them stops flicker.
+ */
+const HAND_THRESHOLDS = { open: 0.18, close: 0.12 };
 const HANDLE_CSS_PX = 16;
 const LINE_FADE_MS = 140;
 const BORDER_FADE_IN_MS = 120;
@@ -184,10 +190,10 @@ export class PortalEngine {
   private applyGestureSettings() {
     const hand = this.input === 'hand';
     this.machine.setConfig({
-      thresholds: hand ? thresholdsForSensitivity(this.settings.sensitivity) : { open: 0.5, close: 0.5 },
+      thresholds: hand ? HAND_THRESHOLDS : { open: 0.5, close: 0.5 },
       newMemoryOnReopen: this.settings.newMemoryOnReopen,
-      // With hands the photo stays visible however small the frame gets.
-      hideWhenClosed: !hand,
+      // Pinched closed = nothing drawn (no portal, no line).
+      hideWhenClosed: true,
       lossHoldMs: hand ? 350 : DEFAULT_GESTURE_CONFIG.lossHoldMs,
       lossFadeMs: hand ? 250 : DEFAULT_GESTURE_CONFIG.lossFadeMs,
     });
@@ -403,9 +409,10 @@ export class PortalEngine {
     let portalAlpha = this.machine.alpha;
     let borderAlpha: number;
     if (this.source === 'none') {
-      quad = this.idleTeaserQuad(now);
-      portalAlpha = 1;
-      borderAlpha = 1;
+      // Camera off: an empty frame.
+      quad = null;
+      portalAlpha = 0;
+      borderAlpha = 0;
     } else if (this.input === 'mouse') {
       if (quad) quad = scaleQuad(quad, 0.94 + 0.06 * easeOut(portalAlpha));
       borderAlpha = portalAlpha;
@@ -434,7 +441,9 @@ export class PortalEngine {
     }
 
     const background =
-      this.source === 'camera'
+      this.source === 'none'
+        ? null
+        : this.source === 'camera'
         ? transform
           ? { kind: 'video' as const, video, transform }
           : null
@@ -447,7 +456,7 @@ export class PortalEngine {
     this.compositor.render({
       now,
       background,
-      dim: this.source === 'none' ? 0.12 : 0,
+      dim: 0,
       quad,
       portalAlpha,
       borderAlpha,
@@ -548,18 +557,6 @@ export class PortalEngine {
         this.callbacks.onAdvance?.(next.id);
       }
     }
-  }
-
-  private idleTeaserQuad(now: number): Quad {
-    const { width: W, height: H } = this.settings.output;
-    const t = now / 1000;
-    const w = (s: number, f: number) => Math.sin(t * f + s) * Math.min(W, H) * 0.025;
-    return {
-      tl: { x: W * 0.3 + w(0, 0.9), y: H * 0.2 + w(1, 0.7) },
-      tr: { x: W * 0.7 + w(2, 0.8), y: H * 0.22 + w(3, 1.0) },
-      br: { x: W * 0.68 + w(4, 0.6), y: H * 0.62 + w(5, 0.9) },
-      bl: { x: W * 0.32 + w(6, 1.1), y: H * 0.6 + w(7, 0.75) },
-    };
   }
 
   // ------------------------------------------------------------- demo input

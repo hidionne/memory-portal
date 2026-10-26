@@ -52,7 +52,7 @@ describe('OneEuroFilter', () => {
 describe('recording format', () => {
   it('prefers MP4 when supported, else WebM', () => {
     expect(pickRecordingMimeType((t) => t.startsWith('video/mp4'))).toMatch(/^video\/mp4/);
-    expect(pickRecordingMimeType((t) => t.startsWith('video/webm'))).toBe('video/webm;codecs=vp9');
+    expect(pickRecordingMimeType((t) => t.startsWith('video/webm'))).toBe('video/webm;codecs=vp9,opus');
     expect(pickRecordingMimeType(() => false)).toBeNull();
   });
 
